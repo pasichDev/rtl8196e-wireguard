@@ -1,0 +1,72 @@
+From 264075eeb5e575073a10c8c9a9b37cdd8ccd8a12 Mon Sep 17 00:00:00 2001
+From: pasichdev <apasichnik9@gmail.com>
+Date: Fri, 2 Oct 2026 19:37:04 +0300
+Subject: [RFC PATCH net-next 0/2] wireguard: crypto in NAPI on single-CPU systems
+
+On a single-CPU system WireGuard's crypt workqueue cannot add parallelism,
+but every packet still pays for its hand-offs: two workqueue hops on
+transmit and one on receive, each with a context switch. Single-core MIPS
+routers are a common OpenWrt target; on one of them (Realtek RTL8196E,
+Lexra RLX4181 at about 400 MHz) WireGuard ran at about 9 Mbit/s while
+plain TCP to the same board ran at 73-88 Mbit/s, and the kernel PC
+profiler put about 22% of CPU time on context switches.
+
+Patch 2 moves crypto into NAPI polls when num_possible_cpus() == 1: a new
+per-peer TX NAPI encrypts and sends, and the existing per-peer NAPI also
+decrypts. The per-peer queues and their reference handling stay as they
+are. Both polls are budgeted. A sending task runs one budget of the TX
+NAPI itself, so a local sender pays for its own encryption; a transmit
+nested inside, as in a routing loop, finds the NAPI owned and only queues,
+so encryption cannot recurse. Machines with more than one possible CPU
+keep the workqueue path.
+
+Patch 1 is a fix found while reviewing that path: packets left on the
+per-peer queues when a peer is removed keep the peer alive. It applies on
+its own.
+
+On that board patch 2 doubles TCP receive throughput through the tunnel
+(9.4 to 18.8 Mbit/s), raises send from 8.2 to 13.8 Mbit/s and cuts
+in-tunnel ping under load from 108 to 31 ms; the table is in the commit
+message. An earlier version that encrypted inline in ndo_start_xmit was
+as fast, but allowed recursion through a routing loop and unbounded
+bottom-half-off work.
+
+Related work: Barone et al., "Achieving Linear CPU Scaling in WireGuard
+with an Efficient Multi-tunnel Architecture" (netdevconf 0x18), process
+WireGuard stages inline per flow to scale over many cores. This series is
+the much narrower single-CPU case.
+
+Open questions:
+
+- Is a static key on num_possible_cpus() == 1 the right condition, or
+  would you rather have a module parameter or a per-device setting?
+- 16 packets per transmit turn and 8 per queue entry were picked for a
+  400 MHz CPU. Should they scale with anything?
+
+This is an RFC because the approach is the question.
+
+Tested on Linux 6.18.54: on the board above, and with
+tools/testing/selftests/wireguard in qemu (arm64, emulated) on an SMP
+kernel with 4 CPUs (workqueue path) and with 1 CPU (NAPI path). Not yet
+done: a rebase onto net-next and a 1-vCPU x86 VM measurement.
+
+The series was developed with the help of an AI assistant (see the
+Assisted-by tags); I have reviewed and tested it and take responsibility
+for it.
+
+pasichdev (2):
+  wireguard: peer: free packets left on the per-peer queues on removal
+  wireguard: run crypto in the peers' NAPI polls on single-CPU systems
+
+ drivers/net/wireguard/main.c     |   1 +
+ drivers/net/wireguard/peer.c     |  27 ++++++++++
+ drivers/net/wireguard/peer.h     |   2 +-
+ drivers/net/wireguard/queueing.c |   8 +++
+ drivers/net/wireguard/queueing.h |  23 ++++++++
+ drivers/net/wireguard/receive.c  |  23 ++++++--
+ drivers/net/wireguard/send.c     | 111 +++++++++++++++++++++++++++++++++++++++
+ 7 files changed, 191 insertions(+), 4 deletions(-)
+
+-- 
+2.53.0
+

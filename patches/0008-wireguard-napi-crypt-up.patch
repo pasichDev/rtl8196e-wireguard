@@ -1,0 +1,300 @@
+--- a/drivers/net/wireguard/main.c
++++ b/drivers/net/wireguard/main.c
+@@ -32,6 +32,7 @@ static int __init wg_mod_init(void)
+ 		goto err_peer;
+ #endif
+ 	wg_noise_init();
++	wg_crypt_inline_init();
+ 
+ 	ret = wg_peer_init();
+ 	if (ret < 0)
+--- a/drivers/net/wireguard/peer.c
++++ b/drivers/net/wireguard/peer.c
+@@ -56,6 +56,11 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
+ 	set_bit(NAPI_STATE_NO_BUSY_POLL, &peer->napi.state);
+ 	netif_napi_add(wg->dev, &peer->napi, wg_packet_rx_poll);
+ 	napi_enable(&peer->napi);
++	if (wg_crypt_is_inline()) {
++		netif_napi_add_tx_weight(wg->dev, &peer->tx_napi, wg_packet_tx_poll,
++					 WG_INLINE_TX_WEIGHT);
++		napi_enable(&peer->tx_napi);
++	}
+ 	list_add_tail(&peer->peer_list, &wg->peer_list);
+ 	INIT_LIST_HEAD(&peer->allowedips_list);
+ 	wg_pubkey_hashtable_add(wg->peer_hashtable, peer);
+@@ -91,6 +96,19 @@ static void peer_make_dead(struct wg_peer *peer)
+ 	/* The caller must now synchronize_net() for this to take effect. */
+ }
+ 
++/* Each queue entry holds a keypair and a peer reference. */
++static void peer_purge_queue(struct wg_peer *peer, struct prev_queue *queue)
++{
++	struct sk_buff *first;
++
++	while ((first = wg_prev_queue_peek(queue)) != NULL) {
++		wg_prev_queue_drop_peeked(queue);
++		wg_noise_keypair_put(PACKET_CB(first)->keypair, false);
++		wg_peer_put(peer);
++		kfree_skb_list(first);
++	}
++}
++
+ static void peer_remove_after_dead(struct wg_peer *peer)
+ {
+ 	WARN_ON(!peer->is_dead);
+@@ -122,6 +140,15 @@ static void peer_remove_after_dead(struct wg_peer *peer)
+ 	 * here from process context.
+ 	 */
+ 	netif_napi_del(&peer->napi);
++	if (wg_crypt_is_inline()) {
++		napi_disable(&peer->tx_napi);
++		netif_napi_del(&peer->tx_napi);
++	}
++	/* A NAPI being disabled completes after at most one more poll, which
++	 * may leave packets on rx_queue that still hold references.
++	 */
++	peer_purge_queue(peer, &peer->rx_queue);
++	peer_purge_queue(peer, &peer->tx_queue);
+ 
+ 	/* Ensure any workstructs we own (like transmit_handshake_work or
+ 	 * clear_peer_work) no longer are in use.
+--- a/drivers/net/wireguard/peer.h
++++ b/drivers/net/wireguard/peer.h
+@@ -62,7 +62,7 @@ struct wg_peer {
+ 	struct rcu_head rcu;
+ 	struct list_head peer_list;
+ 	struct list_head allowedips_list;
+-	struct napi_struct napi;
++	struct napi_struct napi, tx_napi;
+ 	u64 internal_id;
+ };
+ 
+--- a/drivers/net/wireguard/queueing.c
++++ b/drivers/net/wireguard/queueing.c
+@@ -6,6 +6,14 @@
+ #include "queueing.h"
+ #include <linux/skb_array.h>
+ 
++DEFINE_STATIC_KEY_FALSE(wg_crypt_inline);
++
++void __init wg_crypt_inline_init(void)
++{
++	if (num_possible_cpus() == 1)
++		static_branch_enable(&wg_crypt_inline);
++}
++
+ struct multicore_worker __percpu *
+ wg_packet_percpu_multicore_worker_alloc(work_func_t function, void *ptr)
+ {
+--- a/drivers/net/wireguard/queueing.h
++++ b/drivers/net/wireguard/queueing.h
+@@ -12,6 +12,7 @@
+ #include <linux/ip.h>
+ #include <linux/ipv6.h>
+ #include <net/ip_tunnels.h>
++#include <linux/jump_label.h>
+ 
+ struct wg_device;
+ struct wg_peer;
+@@ -20,6 +21,26 @@ struct crypt_queue;
+ struct prev_queue;
+ struct sk_buff;
+ 
++/* With a single possible CPU the crypt workqueue cannot add parallelism and
++ * only costs context switches, so crypto runs in the peers' NAPI polls.
++ */
++DECLARE_STATIC_KEY_FALSE(wg_crypt_inline);
++static inline bool wg_crypt_is_inline(void)
++{
++	return static_branch_unlikely(&wg_crypt_inline);
++}
++
++/* Packets the TX NAPI, or a sending task, encrypts per turn. The receive
++ * NAPI keeps the default weight: a smaller one flushes GRO more often and
++ * costs more than it saves.
++ */
++#define WG_INLINE_TX_WEIGHT 16
++/* Longest packet list queued as one entry, so one entry stays short. */
++#define WG_INLINE_TX_BATCH 8
++/* Undecrypted packets a peer may hold before new ones are dropped. */
++#define WG_INLINE_RX_QUEUE_MAX 256
++void wg_crypt_inline_init(void);
++
+ /* queueing.c APIs: */
+ int wg_packet_queue_init(struct crypt_queue *queue, work_func_t function,
+ 			 unsigned int len);
+@@ -48,6 +69,8 @@ void wg_packet_send_staged_packets(struct wg_peer *peer);
+ /* Workqueue workers: */
+ void wg_packet_handshake_send_worker(struct work_struct *work);
+ void wg_packet_tx_worker(struct work_struct *work);
++/* NAPI poll function, used when wg_crypt_is_inline(): */
++int wg_packet_tx_poll(struct napi_struct *napi, int budget);
+ void wg_packet_encrypt_worker(struct work_struct *work);
+ 
+ enum packet_state {
+--- a/drivers/net/wireguard/receive.c
++++ b/drivers/net/wireguard/receive.c
+@@ -448,9 +448,14 @@ int wg_packet_rx_poll(struct napi_struct *napi, int budget)
+ 	if (unlikely(budget <= 0))
+ 		return 0;
+ 
+-	while ((skb = wg_prev_queue_peek(&peer->rx_queue)) != NULL &&
+-	       (state = atomic_read_acquire(&PACKET_CB(skb)->state)) !=
+-		       PACKET_STATE_UNCRYPTED) {
++	while ((skb = wg_prev_queue_peek(&peer->rx_queue)) != NULL) {
++		state = atomic_read_acquire(&PACKET_CB(skb)->state);
++		if (state == PACKET_STATE_UNCRYPTED) {
++			if (!wg_crypt_is_inline())
++				break;
++			state = likely(decrypt_packet(skb, PACKET_CB(skb)->keypair)) ?
++				PACKET_STATE_CRYPTED : PACKET_STATE_DEAD;
++		}
+ 		wg_prev_queue_drop_peeked(&peer->rx_queue);
+ 		keypair = PACKET_CB(skb)->keypair;
+ 		free = true;
+@@ -523,6 +528,18 @@ static void wg_packet_consume_data(struct wg_device *wg, struct sk_buff *skb)
+ 	if (unlikely(READ_ONCE(peer->is_dead)))
+ 		goto err;
+ 
++	if (wg_crypt_is_inline()) {
++		/* Decrypted later by the peer's NAPI poll, within its budget. */
++		if (unlikely(atomic_read(&peer->rx_queue.count) >= WG_INLINE_RX_QUEUE_MAX))
++			goto err;
++		atomic_set_release(&PACKET_CB(skb)->state, PACKET_STATE_UNCRYPTED);
++		if (unlikely(!wg_prev_queue_enqueue(&peer->rx_queue, skb)))
++			goto err;
++		napi_schedule(&peer->napi);
++		rcu_read_unlock_bh();
++		return;
++	}
++
+ 	ret = wg_queue_enqueue_per_device_and_peer(&wg->decrypt_queue, &peer->rx_queue, skb,
+ 						   wg->packet_crypt_wq);
+ 	if (unlikely(ret == -EPIPE))
+--- a/drivers/net/wireguard/send.c
++++ b/drivers/net/wireguard/send.c
+@@ -308,6 +308,111 @@ void wg_packet_encrypt_worker(struct work_struct *work)
+ 	}
+ }
+ 
++/* Encrypt and send queued entries until about @budget packets are done. */
++static int wg_packet_tx_send(struct wg_peer *peer, int budget)
++{
++	struct noise_keypair *keypair;
++	struct sk_buff *first, *skb, *next;
++	enum packet_state state;
++	int work_done = 0;
++
++	while (work_done < budget &&
++	       (first = wg_prev_queue_peek(&peer->tx_queue)) != NULL) {
++		wg_prev_queue_drop_peeked(&peer->tx_queue);
++		keypair = PACKET_CB(first)->keypair;
++		state = PACKET_STATE_CRYPTED;
++		skb_list_walk_safe(first, skb, next) {
++			++work_done;
++			if (likely(encrypt_packet(skb, keypair))) {
++				wg_reset_packet(skb, true);
++			} else {
++				state = PACKET_STATE_DEAD;
++				break;
++			}
++		}
++		if (likely(state == PACKET_STATE_CRYPTED))
++			wg_packet_create_data_done(peer, first);
++		else
++			kfree_skb_list(first);
++		wg_noise_keypair_put(keypair, false);
++		wg_peer_put(peer);
++	}
++	return work_done;
++}
++
++int wg_packet_tx_poll(struct napi_struct *napi, int budget)
++{
++	struct wg_peer *peer = container_of(napi, struct wg_peer, tx_napi);
++	int work_done;
++
++	if (unlikely(budget <= 0))
++		return 0;
++
++	work_done = wg_packet_tx_send(peer, budget);
++	/* An entry of several packets may overrun the budget by a few. */
++	if (work_done >= budget)
++		return budget;
++	napi_complete_done(napi, work_done);
++	return work_done;
++}
++
++/* A sending task runs one budget of the TX NAPI itself, so it pays for its
++ * own encryption and is paced by it instead of outrunning softirq; the rest
++ * is left to the NAPI. A transmit nested inside, as in a routing loop, finds
++ * the NAPI owned and only queues, so encryption cannot recurse.
++ */
++static void wg_packet_tx_kick(struct wg_peer *peer)
++{
++	if (in_serving_softirq()) {
++		napi_schedule(&peer->tx_napi);
++		return;
++	}
++	if (!napi_schedule_prep(&peer->tx_napi))
++		return;
++	if (wg_packet_tx_send(peer, WG_INLINE_TX_WEIGHT) >= WG_INLINE_TX_WEIGHT)
++		__napi_schedule(&peer->tx_napi);
++	else
++		napi_complete_done(&peer->tx_napi, 0);
++}
++
++/* Queue the list in entries of at most WG_INLINE_TX_BATCH packets for the
++ * TX NAPI, which encrypts and sends them within its budget. The first entry
++ * takes over the caller's keypair and peer references.
++ */
++static void wg_packet_queue_inline(struct wg_peer *peer, struct sk_buff *first)
++{
++	struct noise_keypair *keypair = PACKET_CB(first)->keypair;
++	struct sk_buff *entry = first, *skb, *rest;
++	bool queued = false;
++	unsigned int n;
++
++	/* Keep the keypair alive until every entry has its own reference. */
++	wg_noise_keypair_get(keypair);
++	while (entry) {
++		for (skb = entry, n = 1; skb->next && n < WG_INLINE_TX_BATCH; ++n)
++			skb = skb->next;
++		rest = skb->next;
++		skb->next = NULL;
++		if (queued) {
++			PACKET_CB(entry)->keypair = wg_noise_keypair_get(keypair);
++			wg_peer_get(peer);
++		}
++		atomic_set_release(&PACKET_CB(entry)->state, PACKET_STATE_UNCRYPTED);
++		if (unlikely(!wg_prev_queue_enqueue(&peer->tx_queue, entry))) {
++			wg_noise_keypair_put(PACKET_CB(entry)->keypair, false);
++			wg_peer_put(peer);
++			kfree_skb_list(entry);
++			kfree_skb_list(rest);
++			break;
++		}
++		queued = true;
++		entry = rest;
++	}
++	if (queued)
++		wg_packet_tx_kick(peer);
++	wg_noise_keypair_put(keypair, false);
++}
++
+ static void wg_packet_create_data(struct wg_peer *peer, struct sk_buff *first)
+ {
+ 	struct wg_device *wg = peer->device;
+@@ -317,6 +422,12 @@ static void wg_packet_create_data(struct wg_peer *peer, struct sk_buff *first)
+ 	if (unlikely(READ_ONCE(peer->is_dead)))
+ 		goto err;
+ 
++	if (wg_crypt_is_inline()) {
++		wg_packet_queue_inline(peer, first);
++		rcu_read_unlock_bh();
++		return;
++	}
++
+ 	ret = wg_queue_enqueue_per_device_and_peer(&wg->encrypt_queue, &peer->tx_queue, first,
+ 						   wg->packet_crypt_wq);
+ 	if (unlikely(ret == -EPIPE))

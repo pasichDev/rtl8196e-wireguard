@@ -55,6 +55,14 @@ opt_in() { # variable patch-file kernel-patch-name
 opt_in "${LABGW_CRYPTO_TUNE:-0}" 0003-lib-crypto-mtune-r3000.patch zz-labgw-lib-crypto-tune.patch
 opt_in "${LABGW_WG_ONE_WORKER:-0}" 0004-wireguard-crypt-wq-single-worker.patch zz-labgw-wireguard-wq.patch
 opt_in "${LABGW_WG_INLINE:-0}" 0005-wireguard-inline-crypto-up.patch zz-labgw-wireguard-inline.patch
+# Must sort after zz-labgw-wireguard-inline.patch in any locale (the port globs patches).
+opt_in "${LABGW_WG_INLINE_BUDGET:-0}" 0007-wireguard-inline-tx-budget.patch zz-labgw-wireguard-zbudget.patch
+# Replaces 0005/0007: crypto in per-peer NAPI polls on single-CPU systems.
+if [ "${LABGW_WG_NAPI:-0}" = 1 ] && [ "${LABGW_WG_INLINE:-0}${LABGW_WG_INLINE_BUDGET:-0}" != 00 ]; then
+    echo "LABGW_WG_NAPI excludes LABGW_WG_INLINE and LABGW_WG_INLINE_BUDGET" >&2
+    exit 1
+fi
+opt_in "${LABGW_WG_NAPI:-0}" 0008-wireguard-napi-crypt-up.patch zz-labgw-wireguard-napi.patch
 opt_in "${LABGW_LEXRA_FAST:-0}" 0006-lexra-bswap-and-fused-chacha.patch zz-labgw-lexra-fast.patch
 export KCONFIG_FILE="$upstream/wireguard.config"
 export BOARD=lidl KERNEL=6.18

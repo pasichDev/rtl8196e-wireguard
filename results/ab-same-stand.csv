@@ -1,0 +1,54 @@
+# One board, Linux 6.18.54, wired macOS host running the peer in Docker (colima), same stand for every kernel.
+# TCP: 11 x 30 s per direction, alternating; UDP: 5 x 15 s. Median (min-max). CPU = board busy share; ctxt = context switches per tunnelled packet.
+# UDP floods (200M offered) are listed but varied too much within one kernel to compare.
+kernel,patches,test,median,unit,min,max,runs,retransmits_median,cpu_percent,ctxt_per_packet
+base,"0002 0003","TCP to board",9.44,Mbit/s,9.05,10.14,11,0,100,1.12
+inline-budget,"0002 0003 0005 0007","TCP to board",18.92,Mbit/s,18.32,19.18,11,1,99,0.08
+napi-v2,"0002 0003 0008 (v2: TX and RX weight 16, no sender turn)","TCP to board",16.02,Mbit/s,14.51,16.40,11,0,100,0.27
+napi-v2.1-rx16,"0002 0003 0008 (RX weight 16)","TCP to board",16.86,Mbit/s,15.66,16.96,11,0,100,0.17
+napi-final,"0002 0003 0008","TCP to board",18.84,Mbit/s,18.31,19.14,11,1,99,0.08
+base,"0002 0003","TCP from board -R",8.18,Mbit/s,7.42,8.83,11,0,97,0.91
+inline-budget,"0002 0003 0005 0007","TCP from board -R",13.87,Mbit/s,13.61,14.27,11,0,98,0.13
+napi-v2,"0002 0003 0008 (v2: TX and RX weight 16, no sender turn)","TCP from board -R",13.70,Mbit/s,13.43,13.88,11,0,100,0.15
+napi-v2.1-rx16,"0002 0003 0008 (RX weight 16)","TCP from board -R",13.63,Mbit/s,12.20,13.98,11,0,100,0.07
+napi-final,"0002 0003 0008","TCP from board -R",13.79,Mbit/s,13.52,14.13,11,0,100,0.08
+base,"0002 0003","UDP from board -u -b 200M -l 1380",777,pps,771,780,5,,100,1.54
+inline-budget,"0002 0003 0005 0007","UDP from board -u -b 200M -l 1380",927,pps,926,931,5,,100,0.11
+napi-v2,"0002 0003 0008 (v2: TX and RX weight 16, no sender turn)","UDP from board -u -b 200M -l 1380",389,pps,349,415,5,,51,0.58
+napi-v2.1-rx16,"0002 0003 0008 (RX weight 16)","UDP from board -u -b 200M -l 1380",925,pps,920,930,5,,100,0.11
+napi-final,"0002 0003 0008","UDP from board -u -b 200M -l 1380",921,pps,918,925,5,,100,0.11
+base,"0002 0003","UDP from board -u -b 200M -l 64",858,pps,853,860,5,,100,1.99
+inline-budget,"0002 0003 0005 0007","UDP from board -u -b 200M -l 64",1262,pps,1256,1263,5,,100,0.08
+napi-v2,"0002 0003 0008 (v2: TX and RX weight 16, no sender turn)","UDP from board -u -b 200M -l 64",1050,pps,1040,1052,5,,100,1.20
+napi-v2.1-rx16,"0002 0003 0008 (RX weight 16)","UDP from board -u -b 200M -l 64",1256,pps,1251,1257,5,,100,0.08
+napi-final,"0002 0003 0008","UDP from board -u -b 200M -l 64",1253,pps,1246,1267,5,,100,0.08
+base,"0002 0003","UDP to board -u -b 0.4M -l 64",781,pps,781,781,5,,87,1.94
+inline-budget,"0002 0003 0005 0007","UDP to board -u -b 0.4M -l 64",781,pps,779,781,5,,79,1.51
+napi-v2,"0002 0003 0008 (v2: TX and RX weight 16, no sender turn)","UDP to board -u -b 0.4M -l 64",781,pps,781,781,5,,79,1.54
+napi-v2.1-rx16,"0002 0003 0008 (RX weight 16)","UDP to board -u -b 0.4M -l 64",781,pps,781,781,5,,78,1.53
+napi-final,"0002 0003 0008","UDP to board -u -b 0.4M -l 64",781,pps,781,781,5,,79,1.54
+base,"0002 0003","UDP to board -u -b 10M -l 1380",903,pps,902,905,5,,100,1.21
+inline-budget,"0002 0003 0005 0007","UDP to board -u -b 10M -l 1380",905,pps,905,905,5,,95,0.92
+napi-v2,"0002 0003 0008 (v2: TX and RX weight 16, no sender turn)","UDP to board -u -b 10M -l 1380",905,pps,905,905,5,,95,0.93
+napi-v2.1-rx16,"0002 0003 0008 (RX weight 16)","UDP to board -u -b 10M -l 1380",905,pps,905,905,5,,95,0.94
+napi-final,"0002 0003 0008","UDP to board -u -b 10M -l 1380",905,pps,905,905,5,,96,0.93
+base,"0002 0003","UDP to board -u -b 200M -l 1380",405,pps,362,410,5,,100,1.38
+inline-budget,"0002 0003 0005 0007","UDP to board -u -b 200M -l 1380",497,pps,472,591,5,,100,0.18
+napi-v2,"0002 0003 0008 (v2: TX and RX weight 16, no sender turn)","UDP to board -u -b 200M -l 1380",330,pps,318,350,5,,100,0.39
+napi-v2.1-rx16,"0002 0003 0008 (RX weight 16)","UDP to board -u -b 200M -l 1380",363,pps,357,401,5,,100,0.40
+napi-final,"0002 0003 0008","UDP to board -u -b 200M -l 1380",389,pps,360,430,5,,100,0.17
+base,"0002 0003","UDP to board -u -b 200M -l 64",35267,pps,10970,38708,5,,100,4.29
+inline-budget,"0002 0003 0005 0007","UDP to board -u -b 200M -l 64",2175,pps,1366,2881,5,,100,0.11
+napi-v2,"0002 0003 0008 (v2: TX and RX weight 16, no sender turn)","UDP to board -u -b 200M -l 64",1828,pps,590,3167,5,,100,0.26
+napi-v2.1-rx16,"0002 0003 0008 (RX weight 16)","UDP to board -u -b 200M -l 64",1236,pps,129,2435,5,,100,0.25
+napi-final,"0002 0003 0008","UDP to board -u -b 200M -l 64",2059,pps,177,2873,5,,100,0.10
+base,"0002 0003","ping in tunnel, idle",4.908,ms,3.236,13.497,60,,,
+base,"0002 0003","ping in tunnel, TCP load",108.084,ms,88.017,139.757,60,,,
+inline-budget,"0002 0003 0005 0007","ping in tunnel, idle",3.784,ms,2.574,5.718,60,,,
+inline-budget,"0002 0003 0005 0007","ping in tunnel, TCP load",27.448,ms,4.233,116.819,60,,,
+napi-v2,"0002 0003 0008 (v2: TX and RX weight 16, no sender turn)","ping in tunnel, idle",4.084,ms,2.867,7.664,60,,,
+napi-v2,"0002 0003 0008 (v2: TX and RX weight 16, no sender turn)","ping in tunnel, TCP load",66.46,ms,44.772,109.509,60,,,
+napi-v2.1-rx16,"0002 0003 0008 (RX weight 16)","ping in tunnel, idle",3.726,ms,2.852,5.029,60,,,
+napi-v2.1-rx16,"0002 0003 0008 (RX weight 16)","ping in tunnel, TCP load",53.104,ms,27.775,93.99,60,,,
+napi-final,"0002 0003 0008","ping in tunnel, idle",3.868,ms,2.746,8.176,60,,,
+napi-final,"0002 0003 0008","ping in tunnel, TCP load",31.039,ms,3.827,94.582,60,,,

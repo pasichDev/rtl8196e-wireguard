@@ -1,0 +1,69 @@
+--- a/drivers/net/wireguard/send.c
++++ b/drivers/net/wireguard/send.c
+@@ -259,6 +259,11 @@
+ 	keep_key_fresh(peer);
+ }
+ 
++/* Packets encrypted inline per call on uniprocessor kernels; see
++ * wg_packet_create_data().
++ */
++#define WG_INLINE_TX_BUDGET 8
++
+ static void wg_packet_tx_drain(struct wg_peer *peer, bool may_sleep)
+ {
+ 	struct noise_keypair *keypair;
+@@ -338,10 +343,25 @@
+ 		 * peer queue still orders packets and owns their references.
+ 		 */
+ 		enum packet_state state = PACKET_STATE_CRYPTED;
+-		struct sk_buff *skb, *next;
++		struct sk_buff *skb, *next, *last = NULL, *rest = NULL;
++		unsigned int n = 0;
+ 
++		/* Bound the time spent here with BHs off: encrypt at most
++		 * WG_INLINE_TX_BUDGET packets inline and queue the rest of the
++		 * list for the crypt worker as a separate, later peer queue entry.
++		 */
++		skb_list_walk_safe(first, skb, next) {
++			if (++n > WG_INLINE_TX_BUDGET) {
++				last->next = NULL;
++				rest = skb;
++				break;
++			}
++			last = skb;
++		}
+ 		atomic_set_release(&PACKET_CB(first)->state, PACKET_STATE_UNCRYPTED);
+ 		if (unlikely(!wg_prev_queue_enqueue(&peer->tx_queue, first))) {
++			if (rest)
++				last->next = rest;
+ 			ret = -ENOSPC;
+ 			goto err;
+ 		}
+@@ -354,6 +374,27 @@
+ 			}
+ 		}
+ 		atomic_set_release(&PACKET_CB(first)->state, state);
++		if (rest && unlikely(state == PACKET_STATE_DEAD)) {
++			/* As without the split: one failure drops the whole list. */
++			kfree_skb_list(rest);
++		} else if (rest) {
++			int rest_ret;
++
++			/* Each peer queue entry owns a keypair and a peer reference. */
++			PACKET_CB(rest)->keypair =
++				wg_noise_keypair_get(PACKET_CB(first)->keypair);
++			wg_peer_get(peer);
++			rest_ret = wg_queue_enqueue_per_device_and_peer(&wg->encrypt_queue,
++									&peer->tx_queue, rest,
++									wg->packet_crypt_wq);
++			if (unlikely(rest_ret == -EPIPE)) {
++				wg_queue_enqueue_per_peer_tx(rest, PACKET_STATE_DEAD);
++			} else if (unlikely(rest_ret)) {
++				wg_noise_keypair_put(PACKET_CB(rest)->keypair, false);
++				wg_peer_put(peer);
++				kfree_skb_list(rest);
++			}
++		}
+ 		/* Drain with BH still disabled: the peer queue has one consumer.
+ 		 * The drain drops this list's peer reference; keep our own.
+ 		 */

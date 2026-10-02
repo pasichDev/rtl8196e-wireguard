@@ -1,39 +1,80 @@
 # Sending the WireGuard change upstream
 
-[`0001-wireguard-queueing-skip-the-crypt-workqueue-on-unipr.patch`](0001-wireguard-queueing-skip-the-crypt-workqueue-on-unipr.patch)
-is the cleaned-up form of [`../patches/0005`](../patches/0005-wireguard-inline-crypto-up.patch):
-neutral comments, a commit message with the motivation and the numbers, and
-no change in behaviour. It applies to Linux 6.18.54. `checkpatch.pl` reports
-no warnings; its only error is the missing `Signed-off-by`, which the author
-must add.
+> 🔴 **Not ready to send.** On an x86 KVM guest with one vCPU, patch 2
+> causes ~9000 TCP retransmissions per 10 s run where vanilla has none,
+> most likely because the 256-packet receive queue cap drops packets that
+> a fast CPU produces faster than the receive NAPI drains them. The board
+> never reaches that cap. A 2–7% slowdown with 4 vCPUs, where the code path
+> should be unchanged, may be noise from other load on the host and is
+> being rechecked.
+>
+> Done: applies to `net-next` (`c29fbea7e`) unchanged and passes the
+> WireGuard selftests there under KVM with 1 and 4 vCPUs.
+
+A two-patch RFC series against Linux 6.18.54:
+
+| Patch | What | Board equivalent |
+|---|---|---|
+| [`0001`](0001-wireguard-peer-free-packets-left-on-the-per-peer-que.patch) | Fix: packets left on the per-peer queues when a peer is removed keep the peer alive. Present since WireGuard was merged; applies on its own. | part of [`0008`](../patches/0008-wireguard-napi-crypt-up.patch) |
+| [`0002`](0002-wireguard-run-crypto-in-the-peers-NAPI-polls-on-sing.patch) | With one possible CPU, crypto runs in budgeted per-peer NAPI polls instead of the crypt workqueue. | [`0008`](../patches/0008-wireguard-napi-crypt-up.patch) |
+
+The cover letter is [`0000-cover-letter.patch`](0000-cover-letter.patch).
+
+## Why not the first version
+
+The first version ([`../patches/0005`](../patches/0005-wireguard-inline-crypto-up.patch),
+with the budget in [`0007`](../patches/0007-wireguard-inline-tx-budget.patch))
+encrypted inline in `ndo_start_xmit` with bottom halves off. It was fast, but a
+review found problems that would block it:
+
+- A routing loop through the device recursed into encryption on every level.
+  Each level costs about 1.2 KB of stack, and the 8 KiB MIPS stack has no guard
+  page; WireGuard has no loop guard of its own.
+- Bottom-half-off work was bounded only by packet count, and the transmit
+  worker drained its whole queue with bottom halves off.
+- It was selected with `!CONFIG_SMP`, which misses SMP kernels on one CPU.
+
+In patch 2 encryption runs only by whoever owns the TX NAPI: its poll, or a
+sending task for one budget. A nested transmit finds the NAPI owned and just
+queues. Transmit works in turns of 16 packets; receive keeps the default NAPI
+weight, because 16 cost 11% of TCP receive throughput on the board (GRO
+flushed more often). A static key selects the mode when
+`num_possible_cpus() == 1`.
 
 ## Before sending
 
-1. Rebase on `net-next` and rebuild. Check the WireGuard files changed little
-   since 6.18:
+1. Check that the cover letter's "Tested on" paragraph matches what was run.
+2. Rebase on `net-next`:
    ```sh
    git clone https://git.kernel.org/pub/scm/linux/kernel/git/netdev/net-next.git
-   cd net-next && git am -3 ../0001-wireguard-queueing-skip-the-crypt-workqueue-on-unipr.patch
+   cd net-next && git am -3 ../000[12]-*.patch
    ```
-2. Sign it off (Developer Certificate of Origin, by the author, not a tool):
-   `git commit --amend -s`.
-3. Run the kernel's WireGuard selftest on an SMP and a UP build:
-   `tools/testing/selftests/wireguard/qemu` (`make -C tools/testing/selftests/wireguard/qemu`),
-   with `CONFIG_SMP=n` set for the second run.
-4. Run `scripts/checkpatch.pl --strict` on the result.
+3. Run the WireGuard selftests twice: once with several CPUs (workqueue path)
+   and once with one (NAPI path). One CPU is enough; no `CONFIG_SMP=n` build is
+   needed:
+   ```sh
+   make -C tools/testing/selftests/wireguard/qemu -j"$(nproc)"
+   make -C tools/testing/selftests/wireguard/qemu -j"$(nproc)" NR_CPUS=1
+   ```
+4. Keep the `Assisted-by: LLM` lines. The kernel requires them for AI-assisted
+   work (`Documentation/process/coding-assistants.rst`). Read every line, then
+   sign off yourself; a tool must not add a `Signed-off-by`:
+   `git rebase --exec 'git commit --amend --no-edit -s' HEAD~2`.
+5. Run `scripts/checkpatch.pl --strict` on the result. On 6.18.54 with a
+   mainline `checkpatch.pl`, the only findings are the missing `Signed-off-by`
+   and the `Fixes:` id, which it cannot resolve without a git tree. The id is
+   `e7096c131e51`, the commit that added WireGuard.
 
 ## Sending
 
 `net-next` is closed during the merge window; check
-<https://patchwork.hopto.org/net-next.html> first. Then:
+<https://patchwork.hopto.org/net-next.html> first. Patch 1 is a fix and may be
+asked for separately against `net`.
 
 ```sh
-git format-patch -1 --subject-prefix="PATCH net-next" --cover-letter -o out/
-# paste cover-letter.txt into out/0000-cover-letter.patch
-./scripts/get_maintainer.pl out/0001-*.patch
+git format-patch -2 --subject-prefix="RFC PATCH net-next" --cover-letter -o out/
+# copy the text of 0000-cover-letter.patch into out/0000-cover-letter.patch
+./scripts/get_maintainer.pl out/000[12]-*.patch
 git send-email --to=wireguard@lists.zx2c4.com --to=netdev@vger.kernel.org \
   --cc="Jason A. Donenfeld <Jason@zx2c4.com>" out/*.patch
 ```
-
-`get_maintainer.pl` on 6.18 lists Jason A. Donenfeld (WireGuard maintainer),
-the netdev maintainers, `wireguard@lists.zx2c4.com` and `netdev@vger.kernel.org`.
