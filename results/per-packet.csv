@@ -1,0 +1,6 @@
+# Board sending UDP through WireGuard (kernel with 0002 only), 0% loss, board CPU-bound.
+payload_bytes,plain_udp_pps,wireguard_pps
+64,2668,917
+256,2606,904
+700,2569,888
+1380,2505,856

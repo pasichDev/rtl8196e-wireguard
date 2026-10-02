@@ -1,0 +1,189 @@
+From 75c96e1b816eb46d4be036da75e8d342d7cdf827 Mon Sep 17 00:00:00 2001
+From: pasichdev <apasichnik9@gmail.com>
+Date: Fri, 2 Oct 2026 15:17:06 +0300
+Subject: [PATCH] wireguard: queueing: skip the crypt workqueue on uniprocessor
+ kernels
+
+On SMP, WireGuard spreads encryption and decryption over CPUs with the
+packet_crypt_wq workqueue, then restores order through the per-peer
+queues. On a uniprocessor kernel there is nothing to parallelise, but the
+hand-offs remain: every transmitted packet goes through the encrypt worker
+and then the per-peer transmit worker, and every received packet through
+the decrypt worker before the peer's NAPI poll. Each hop wakes a kworker
+and costs a context switch.
+
+On a single-core 400 MHz MIPS router (Realtek RTL8196E, Lexra RLX4181)
+the kernel PC profiler attributed about 22% of CPU time during a
+WireGuard transfer to the IRQ re-enable after __schedule() and
+finish_task_switch(), and /proc/stat showed about 0.85 context switches
+per tunnelled packet.
+
+When CONFIG_SMP is off:
+
+- wg_packet_create_data() still enqueues the packet list on the peer's
+  tx queue, which orders packets and owns their references, but then
+  encrypts it in place and drains the queue directly instead of queueing
+  encrypt and transmit work. The drain runs with bottom halves disabled,
+  and wg_packet_tx_worker() also disables them, so the multi-producer
+  single-consumer peer queue keeps a single consumer.
+
+- wg_packet_consume_data() enqueues the packet on the peer's rx queue as
+  UNCRYPTED and schedules the peer's NAPI; wg_packet_rx_poll() decrypts
+  it within its NAPI budget instead of stopping at it. Decrypting
+  directly in wg_packet_consume_data() was tried first: it put the crypto
+  cost inside the NIC driver's NAPI poll, raised time_squeeze about
+  14-fold and caused TCP throughput collapses with retransmits.
+
+SMP behaviour is unchanged; on SMP the new branches are compiled out and
+wg_packet_rx_poll() still stops at an undecrypted packet.
+
+Measured on that board with Linux 6.18.54 and iperf3, the board being the
+tunnel endpoint. Both kernels are profiling builds with the same config;
+they differ by this change and by -mtune=r3000 on four lib/crypto files,
+whose effect was not measured separately. After: median of five 15 s runs.
+
+                      before   after
+  receive (decrypt)    8.92*   19.64 Mbit/s
+  send (encrypt)       7.85*   13.83 Mbit/s
+  ctxt per packet      ~0.85   0.03-0.09
+  scheduler in profile  ~22%     ~4%
+
+  * single runs
+
+No BUG, WARN or "scheduling while atomic" was logged over these runs and
+over routed traffic through the tunnel.
+---
+ drivers/net/wireguard/receive.c | 25 ++++++++++++++--
+ drivers/net/wireguard/send.c    | 52 +++++++++++++++++++++++++++++++--
+ 2 files changed, 71 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/wireguard/receive.c b/drivers/net/wireguard/receive.c
+index eb88511..0a9f620 100644
+--- a/drivers/net/wireguard/receive.c
++++ b/drivers/net/wireguard/receive.c
+@@ -448,9 +448,15 @@ int wg_packet_rx_poll(struct napi_struct *napi, int budget)
+ 	if (unlikely(budget <= 0))
+ 		return 0;
+ 
+-	while ((skb = wg_prev_queue_peek(&peer->rx_queue)) != NULL &&
+-	       (state = atomic_read_acquire(&PACKET_CB(skb)->state)) !=
+-		       PACKET_STATE_UNCRYPTED) {
++	while ((skb = wg_prev_queue_peek(&peer->rx_queue)) != NULL) {
++		state = atomic_read_acquire(&PACKET_CB(skb)->state);
++		if (state == PACKET_STATE_UNCRYPTED) {
++			if (IS_ENABLED(CONFIG_SMP))
++				break;
++			/* UP: wg_packet_consume_data() left decryption to us. */
++			state = likely(decrypt_packet(skb, PACKET_CB(skb)->keypair)) ?
++				PACKET_STATE_CRYPTED : PACKET_STATE_DEAD;
++		}
+ 		wg_prev_queue_drop_peeked(&peer->rx_queue);
+ 		keypair = PACKET_CB(skb)->keypair;
+ 		free = true;
+@@ -523,6 +529,19 @@ static void wg_packet_consume_data(struct wg_device *wg, struct sk_buff *skb)
+ 	if (unlikely(READ_ONCE(peer->is_dead)))
+ 		goto err;
+ 
++	if (!IS_ENABLED(CONFIG_SMP)) {
++		/* With one CPU, skip the crypt workqueue: queue the packet for the
++		 * peer's NAPI poll, which decrypts it within its own budget. This
++		 * also keeps the crypto out of the underlying NIC's NAPI poll.
++		 */
++		atomic_set_release(&PACKET_CB(skb)->state, PACKET_STATE_UNCRYPTED);
++		if (unlikely(!wg_prev_queue_enqueue(&peer->rx_queue, skb)))
++			goto err;
++		napi_schedule(&peer->napi);
++		rcu_read_unlock_bh();
++		return;
++	}
++
+ 	ret = wg_queue_enqueue_per_device_and_peer(&wg->decrypt_queue, &peer->rx_queue, skb,
+ 						   wg->packet_crypt_wq);
+ 	if (unlikely(ret == -EPIPE))
+diff --git a/drivers/net/wireguard/send.c b/drivers/net/wireguard/send.c
+index 67d0147..8e55ef7 100644
+--- a/drivers/net/wireguard/send.c
++++ b/drivers/net/wireguard/send.c
+@@ -259,9 +259,8 @@ static void wg_packet_create_data_done(struct wg_peer *peer, struct sk_buff *fir
+ 	keep_key_fresh(peer);
+ }
+ 
+-void wg_packet_tx_worker(struct work_struct *work)
++static void wg_packet_tx_drain(struct wg_peer *peer, bool may_sleep)
+ {
+-	struct wg_peer *peer = container_of(work, struct wg_peer, transmit_packet_work);
+ 	struct noise_keypair *keypair;
+ 	enum packet_state state;
+ 	struct sk_buff *first;
+@@ -279,11 +278,27 @@ void wg_packet_tx_worker(struct work_struct *work)
+ 
+ 		wg_noise_keypair_put(keypair, false);
+ 		wg_peer_put(peer);
+-		if (need_resched())
++		if (may_sleep && need_resched())
+ 			cond_resched();
+ 	}
+ }
+ 
++void wg_packet_tx_worker(struct work_struct *work)
++{
++	struct wg_peer *peer = container_of(work, struct wg_peer, transmit_packet_work);
++
++	if (!IS_ENABLED(CONFIG_SMP)) {
++		/* On UP, wg_packet_create_data() also drains this queue from BH
++		 * context. The queue has a single consumer, so drain with BHs off.
++		 */
++		local_bh_disable();
++		wg_packet_tx_drain(peer, false);
++		local_bh_enable();
++		return;
++	}
++	wg_packet_tx_drain(peer, true);
++}
++
+ void wg_packet_encrypt_worker(struct work_struct *work)
+ {
+ 	struct crypt_queue *queue = container_of(work, struct multicore_worker,
+@@ -317,6 +332,37 @@ static void wg_packet_create_data(struct wg_peer *peer, struct sk_buff *first)
+ 	if (unlikely(READ_ONCE(peer->is_dead)))
+ 		goto err;
+ 
++	if (!IS_ENABLED(CONFIG_SMP)) {
++		/* With one CPU the crypt workqueue cannot run in parallel; it only
++		 * adds two context switches per packet. Encrypt in place and send
++		 * now. The peer queue still orders packets and holds their
++		 * references, and it is drained with BHs off (single consumer).
++		 */
++		enum packet_state state = PACKET_STATE_CRYPTED;
++		struct sk_buff *skb, *next;
++
++		atomic_set_release(&PACKET_CB(first)->state, PACKET_STATE_UNCRYPTED);
++		if (unlikely(!wg_prev_queue_enqueue(&peer->tx_queue, first))) {
++			ret = -ENOSPC;
++			goto err;
++		}
++		skb_list_walk_safe(first, skb, next) {
++			if (likely(encrypt_packet(skb, PACKET_CB(first)->keypair))) {
++				wg_reset_packet(skb, true);
++			} else {
++				state = PACKET_STATE_DEAD;
++				break;
++			}
++		}
++		atomic_set_release(&PACKET_CB(first)->state, state);
++		/* The drain drops this list's peer reference; hold our own. */
++		wg_peer_get(peer);
++		wg_packet_tx_drain(peer, false);
++		wg_peer_put(peer);
++		rcu_read_unlock_bh();
++		return;
++	}
++
+ 	ret = wg_queue_enqueue_per_device_and_peer(&wg->encrypt_queue, &peer->tx_queue, first,
+ 						   wg->packet_crypt_wq);
+ 	if (unlikely(ret == -EPIPE))
+
+base-commit: 3ad3efd5b1ce1d75b7a459619a17e50b51ea0c54
+-- 
+2.53.0
+

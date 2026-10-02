@@ -1,0 +1,18 @@
+diff --git a/3-Main-SoC-Realtek-RTL8196E/32-Kernel/files-6.18/arch/mips/boot/dts/realtek/rtl8196e.dts b/3-Main-SoC-Realtek-RTL8196E/32-Kernel/files-6.18/arch/mips/boot/dts/realtek/rtl8196e.dts
+index 2e564e1..b43cf60 100644
+--- a/3-Main-SoC-Realtek-RTL8196E/32-Kernel/files-6.18/arch/mips/boot/dts/realtek/rtl8196e.dts
++++ b/3-Main-SoC-Realtek-RTL8196E/32-Kernel/files-6.18/arch/mips/boot/dts/realtek/rtl8196e.dts
+@@ -152,8 +152,12 @@
+ 			};
+ 
+ 			partition@400000 {
++				label = "tuya-label";
++				reg = <0x400000 0x020000>;
++			};
++			partition@420000 {
+ 				label = "jffs2-fs";
+-				reg = <0x400000 0xc00000>;      /* 12 MB */
++				reg = <0x420000 0xbe0000>;
+ 			};
+ 		};
+ 	};

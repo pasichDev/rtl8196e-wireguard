@@ -1,0 +1,14 @@
+--- a/drivers/net/wireguard/device.c
++++ b/drivers/net/wireguard/device.c
+@@ -343,8 +343,10 @@
+ 	if (!wg->handshake_send_wq)
+ 		goto err_destroy_handshake_receive;
+ 
++	/* labgw: on a single core WQ_CPU_INTENSIVE wakes a second kworker for the
++	 * tx work queued behind each encrypt work; run both in one worker. */
+ 	wg->packet_crypt_wq = alloc_workqueue("wg-crypt-%s",
+-			WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM | WQ_PERCPU, 0,
++			WQ_MEM_RECLAIM | WQ_PERCPU, 0,
+ 			dev->name);
+ 	if (!wg->packet_crypt_wq)
+ 		goto err_destroy_handshake_send;

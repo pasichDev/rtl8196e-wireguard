@@ -1,0 +1,15 @@
+--- a/lib/crypto/Makefile
++++ b/lib/crypto/Makefile
+@@ -52,6 +52,12 @@
+ CFLAGS_chacha-block-generic.o += -O2
+ CFLAGS_chacha20poly1305.o += -O2
+ CFLAGS_utils.o += -O2
++# labgw: gcc 970-Lexra.patch defines PROCESSOR_LX4380 without an rtx cost
++# table, so -O2 schedules as if every instruction were free. Tune for R3000.
++CFLAGS_chacha.o += -mtune=r3000
++CFLAGS_chacha-block-generic.o += -mtune=r3000
++CFLAGS_chacha20poly1305.o += -mtune=r3000
++CFLAGS_utils.o += -mtune=r3000
+ 
+ ifeq ($(CONFIG_CRYPTO_LIB_CHACHA_ARCH),y)
+ CFLAGS_chacha.o += -I$(src)/$(SRCARCH)

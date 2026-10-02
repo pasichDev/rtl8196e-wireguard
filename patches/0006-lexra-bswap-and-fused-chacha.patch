@@ -1,0 +1,96 @@
+--- a/arch/mips/Kconfig
++++ b/arch/mips/Kconfig
+@@ -19,7 +19,8 @@
+ 	select ARCH_HAS_UBSAN
+ 	select ARCH_HAS_GCOV_PROFILE_ALL
+ 	select ARCH_KEEP_MEMBLOCK
+-	select ARCH_USE_BUILTIN_BSWAP
++	# labgw: without wsbh (Lexra) gcc lowers __builtin_bswap32 to a libgcc call
++	select ARCH_USE_BUILTIN_BSWAP if !CPU_RLX4181
+ 	select ARCH_USE_CMPXCHG_LOCKREF if 64BIT
+ 	select ARCH_USE_MEMTEST
+ 	select ARCH_USE_QUEUED_RWLOCKS
+--- a/include/crypto/chacha.h
++++ b/include/crypto/chacha.h
+@@ -45,6 +45,9 @@
+ 	chacha_block_generic(state, out, 20);
+ }
+ 
++/* XOR the keystream into src -> dst; may be called with any length. */
++void chacha_xor_generic(struct chacha_state *state, u8 *dst, const u8 *src,
++			unsigned int bytes, int nrounds);
+ void hchacha_block_generic(const struct chacha_state *state,
+ 			   u32 out[HCHACHA_OUT_WORDS], int nrounds);
+ 
+--- a/lib/crypto/chacha-block-generic.c
++++ b/lib/crypto/chacha-block-generic.c
+@@ -92,6 +92,45 @@
+ }
+ EXPORT_SYMBOL(chacha_block_generic);
+ 
++/*
++ * labgw: one pass per 64-byte block. The permuted words are fed forward and
++ * XORed straight into the destination, one byte swap per word, instead of a
++ * stack keystream, per-block zeroing and a separate crypto_xor_cpy() pass.
++ * get_unaligned()/put_unaligned() read and write the bytes in CPU order, so
++ * XORing with cpu_to_le32(word) matches the little-endian keystream bytes.
++ */
++void chacha_xor_generic(struct chacha_state *state, u8 *dst, const u8 *src,
++			unsigned int bytes, int nrounds)
++{
++	struct chacha_state x;
++	int i;
++
++	while (bytes >= CHACHA_BLOCK_SIZE) {
++		x = *state;
++		chacha_permute(&x, nrounds);
++		for (i = 0; i < ARRAY_SIZE(x.x); i++) {
++			u32 k = (__force u32)cpu_to_le32(x.x[i] + state->x[i]);
++
++			put_unaligned(get_unaligned((const u32 *)src + i) ^ k,
++				      (u32 *)dst + i);
++		}
++		state->x[12]++;
++		bytes -= CHACHA_BLOCK_SIZE;
++		dst += CHACHA_BLOCK_SIZE;
++		src += CHACHA_BLOCK_SIZE;
++	}
++	if (bytes) {
++		u8 stream[CHACHA_BLOCK_SIZE] __aligned(sizeof(long));
++
++		chacha_block_generic(state, stream, nrounds);
++		for (i = 0; i < bytes; i++)
++			dst[i] = src[i] ^ stream[i];
++		memzero_explicit(stream, sizeof(stream));
++	}
++	chacha_zeroize_state(&x);
++}
++EXPORT_SYMBOL(chacha_xor_generic);
++
+ /**
+  * hchacha_block_generic - abbreviated ChaCha core, for XChaCha
+  * @state: input state matrix
+--- a/lib/crypto/chacha.c
++++ b/lib/crypto/chacha.c
+@@ -15,20 +15,7 @@
+ chacha_crypt_generic(struct chacha_state *state, u8 *dst, const u8 *src,
+ 		     unsigned int bytes, int nrounds)
+ {
+-	/* aligned to potentially speed up crypto_xor() */
+-	u8 stream[CHACHA_BLOCK_SIZE] __aligned(sizeof(long));
+-
+-	while (bytes >= CHACHA_BLOCK_SIZE) {
+-		chacha_block_generic(state, stream, nrounds);
+-		crypto_xor_cpy(dst, src, stream, CHACHA_BLOCK_SIZE);
+-		bytes -= CHACHA_BLOCK_SIZE;
+-		dst += CHACHA_BLOCK_SIZE;
+-		src += CHACHA_BLOCK_SIZE;
+-	}
+-	if (bytes) {
+-		chacha_block_generic(state, stream, nrounds);
+-		crypto_xor_cpy(dst, src, stream, bytes);
+-	}
++	chacha_xor_generic(state, dst, src, bytes, nrounds);
+ }
+ 
+ #ifdef CONFIG_CRYPTO_LIB_CHACHA_ARCH

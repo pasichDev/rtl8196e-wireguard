@@ -1,0 +1,31 @@
+Subject: [PATCH net-next 0/1] wireguard: skip the crypt workqueue on UP
+
+WireGuard parallelises crypto over CPUs with packet_crypt_wq and restores
+order through per-peer queues. On a uniprocessor kernel the workqueue cannot
+add parallelism, but every packet still pays for the hand-offs: two
+workqueue hops on transmit, one on receive, each with a context switch.
+
+Single-core MIPS routers are a common OpenWrt target. On one of them (Realtek
+RTL8196E, Lexra RLX4181 at about 400 MHz) WireGuard ran at about 9 Mbit/s
+while plain TCP to the same board ran at 73-88 Mbit/s. Throughput was nearly
+independent of packet size, and the kernel PC profiler put about 22% of CPU
+time on context switches, with about 0.85 per tunnelled packet.
+
+The patch keeps the per-peer queues and their reference handling, and on UP
+encrypts inline before draining the transmit queue, and decrypts in the
+peer's NAPI poll. On that board receive went from 8.9 to 19.6 Mbit/s and send
+from 7.9 to 13.8 Mbit/s; details are in the commit message. SMP builds
+compile the new branches out.
+
+Open questions for review:
+
+- Is a !CONFIG_SMP special case acceptable here, or would you prefer a
+  runtime condition (e.g. num_possible_cpus() == 1) so that SMP kernels on
+  single-CPU machines benefit too?
+- On transmit the whole GSO batch is encrypted with bottom halves disabled.
+  On this CPU a 64 KB batch takes tens of milliseconds. No packet loss was
+  seen, but a budget (or deferring to the existing worker past one) may be
+  preferable.
+
+Tested only on the board above with Linux 6.18.54; I would be glad of results
+from other uniprocessor devices.

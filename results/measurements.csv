@@ -1,0 +1,35 @@
+# All on one SGWZ 1 A1 (RTL8196E, Lexra RLX4181 ~400 MHz, single core, 32 MiB), Linux 6.18.54.
+# Mbit/s from iperf3; "endpoint" = iperf3 server on the board through a WireGuard tunnel.
+# Kernels: original = upstream port; o2 = 0002; profiling = empty I-MEM PC-sampler build;
+# inline = 0002 0003 0005 (recommended); fast = inline + 0006. The original kernel was not
+# measured with iperf3; its routed rows used the same goal runner as the inline rows.
+# "runs" = number of 15 s runs; median reported when runs > 1. Host link as stated.
+kernel,patches,host_link,scenario,direction,mbit_s,runs,notes
+o2,0002,wifi,plain TCP endpoint,to_board,87.6,1,no WireGuard
+o2,0002,wifi,plain TCP endpoint,from_board,73.4,1,no WireGuard
+o2,0002,wifi,WG endpoint,to_board,9.02,1,
+o2,0002,wifi,WG endpoint,from_board,8.68,1,
+profiling,0002,wifi,WG endpoint,to_board,8.92,1,empty I-MEM profiling build
+profiling,0002,wifi,WG endpoint,from_board,7.85,1,empty I-MEM profiling build
+profiling,0002 0003 0004,wifi,WG endpoint,to_board,7.07,1,negative: one worker
+profiling,0002 0003 0004,wifi,WG endpoint,from_board,5.94,1,negative: one worker
+profiling,0002 0003 0005,wifi,WG endpoint,to_board,19.64,5,runs 20.63 19.08 19.64 21.31 16.39
+profiling,0002 0003 0005,wifi,WG endpoint,from_board,13.83,5,runs 14.03 13.83 14.29 11.67 12.98
+inline,0002 0003 0005,wifi,WG endpoint,to_board,19.72,5,runs 19.68 20.87 19.72 21.43 18.68
+inline,0002 0003 0005,wifi,WG endpoint,from_board,13.90,5,runs 13.11 13.90 14.92 12.51 15.21
+inline,0002 0003 0005,wired,WG endpoint,to_board,22.38,5,runs 21.45 22.38 22.33 22.46 22.54
+inline,0002 0003 0005,wired,WG endpoint,from_board,14.43,5,runs 14.43 14.36 15.31 14.46 14.40
+fast,0002 0003 0005 0006,wired,WG endpoint,to_board,20.91,5,negative: runs 21.01 20.91 20.89 20.97 20.91
+fast,0002 0003 0005 0006,wired,WG endpoint,from_board,13.50,5,negative: runs 13.58 13.54 13.43 13.35 13.50
+original,none,wifi,routed LAN via outbound tunnel (whole LAN),forward,7.68,1,
+original,none,wifi,routed LAN via outbound tunnel (whole LAN),reverse,6.78,1,
+original,none,wifi,routed LAN via outbound tunnel (selected device),forward,7.43,1,
+original,none,wifi,routed LAN via outbound tunnel (selected device),reverse,6.49,1,
+original,none,wifi,routed inbound peer via UDP relay,forward,6.78,1,
+original,none,wifi,routed inbound peer via UDP relay,reverse,7.23,1,
+inline,0002 0003 0005,wired,routed LAN via outbound tunnel (whole LAN),forward,8.63,1,board CPU 97%
+inline,0002 0003 0005,wired,routed LAN via outbound tunnel (whole LAN),reverse,9.12,1,board CPU 96%
+inline,0002 0003 0005,wired,routed LAN via outbound tunnel (selected device),forward,8.64,1,board CPU 96%
+inline,0002 0003 0005,wired,routed LAN via outbound tunnel (selected device),reverse,9.13,1,board CPU 96%
+inline,0002 0003 0005,wired,routed inbound peer via UDP relay,forward,9.40,1,board CPU 98%
+inline,0002 0003 0005,wired,routed inbound peer via UDP relay,reverse,9.42,1,board CPU 97%

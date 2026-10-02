@@ -1,0 +1,15 @@
+--- a/lib/crypto/Makefile
++++ b/lib/crypto/Makefile
+@@ -46,6 +46,12 @@
+ 
+ obj-$(CONFIG_CRYPTO_LIB_CHACHA) += libchacha.o
+ libchacha-y := chacha.o
++# labgw: RLX4181 has no rotr, so the MIPS ChaCha assembly is unavailable and
++# the generic C code is the WireGuard data path. Build it with -O2, not -Os.
++CFLAGS_chacha.o += -O2
++CFLAGS_chacha-block-generic.o += -O2
++CFLAGS_chacha20poly1305.o += -O2
++CFLAGS_utils.o += -O2
+ 
+ ifeq ($(CONFIG_CRYPTO_LIB_CHACHA_ARCH),y)
+ CFLAGS_chacha.o += -I$(src)/$(SRCARCH)
