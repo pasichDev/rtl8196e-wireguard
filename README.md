@@ -52,12 +52,8 @@ CPU benefit too):
   NAPI poll decrypts it. Decrypting earlier, inside the Ethernet driver's
   NAPI poll, raised `time_squeeze` 14-fold and made TCP collapse.
 - **Safety:** encryption runs only by whoever owns the TX NAPI, so a routing
-  loop through the device queues instead of recursing; the receive queue is
-  capped at 256 packets; packets left on the queues when a peer is removed
-  are freed (a leak that also exists without this patch).
-
-The change is prepared for the WireGuard and netdev lists in
-[upstream/](upstream/).
+  loop through the device queues instead of recursing, and packets left on
+  the queues when a peer is removed are freed.
 
 ### How it got there
 
@@ -73,6 +69,49 @@ The change is prepared for the WireGuard and netdev lists in
 3. Letting the sending task run one turn of the TX NAPI fixed UDP (925 pps).
    Giving the receive NAPI its default weight again fixed TCP receive: with a
    weight of 16, GRO on the tunnel flushed four times as often.
+
+## Routing a LAN into the tunnel
+
+The ×2 above is for the board as a tunnel endpoint. Routing a LAN into the
+tunnel adds netfilter, conntrack, NAT and a second Ethernet pass to every
+packet. A profile of routed traffic with `0008` puts crypto at ~21% of the
+CPU, netfilter at ~13% and conntrack hashing (siphash) at another ~4%.
+
+The tunnel's own outer UDP is never NATed, yet it went through conntrack
+too. Skipping it with two raw-table rules (`CT --notrack` for UDP to and
+from the tunnel endpoint) needs `CONFIG_NETFILTER_XT_TARGET_CT`, which
+[wireguard-kernel.fragment](wireguard-kernel.fragment) now enables, and an
+iptables build with the CT extension. Whole-LAN routing through the tunnel,
+120 s iperf3 runs ([results/routed.csv](results/routed.csv)):
+
+| | Forward | Reverse |
+| --- | --- | --- |
+| `0008`, conntrack on the outer UDP | 8.68 / 8.63 Mbit/s | 9.98 / 9.93 Mbit/s |
+| `0008` + NOTRACK for the outer UDP | **9.23 / 9.25 / 9.09** | **10.71 / 10.66 / 10.62** |
+
+The third NOTRACK run had the rules installed by the gateway daemon itself
+rather than by hand. The port's original kernel managed 7.68 forward and
+6.78 Mbit/s reverse, measured over Wi-Fi without `0002`/`0003` in single
+5 s runs, so on a router the gain is roughly +20% forward and +55% reverse,
+not ×2.
+
+## Upstream
+
+[upstream/](upstream/) holds a two-patch RFC series for the WireGuard and
+netdev lists, against `net-next`:
+
+1. **A bug fix for WireGuard as it is:** a peer removed while its receive
+   queue holds more than one NAPI budget of packets is never freed, with
+   its keypair. Present since WireGuard was merged in 2019. Reproduced with
+   [upstream/repro-peer-leak.sh](upstream/repro-peer-leak.sh): 5 leaks in
+   2140 peer removals on `net-next` without the fix, 0 in 2140 with it
+   ([results/peer-leak.csv](results/peer-leak.csv)).
+2. **`0008`** in upstream form. On an x86 guest with one vCPU TCP between two
+   namespaces gains 7–8%; with four vCPUs nothing changes
+   ([results/x86-vm.csv](results/x86-vm.csv)).
+
+Both pass the kernel's WireGuard selftests on `net-next` (x86 KVM) and on
+6.18.54 (arm64, emulated), with 4 CPUs and with 1.
 
 ## Patches
 
@@ -118,6 +157,7 @@ docker build -t lexra-builder -f builder/Dockerfile port/1-Build-Environment
 LABGW_CRYPTO_O2=1 LABGW_CRYPTO_TUNE=1 LABGW_WG_NAPI=1 \
   builder/build-in-docker.sh port out kernel-wireguard
 ```
+
 The script checks the port revision, that WireGuard, TUN, policy routing,
 legacy iptables and NAT survived Kconfig, the partition size and the Realtek
 image header. It never writes to a device.
@@ -146,7 +186,10 @@ routing needs a full iproute2 `ip` in userspace.
   decoder is [tools/profile_decode.py](tools/profile_decode.py).
 - Routed figures come from a policy-routing gateway daemon forwarding a LAN
   client into an outbound tunnel, and an inbound peer reaching the LAN
-  through a fixed-tuple UDP relay. They are single runs.
+  through a fixed-tuple UDP relay. The NOTRACK comparison used 120 s runs;
+  older routed figures are single 5 s runs.
+- The x86 figures come from the kernel's WireGuard selftest VM under KVM,
+  with the selftest's iperf3 runs lengthened to 10 s, medians of three.
 
 ## Limits
 
@@ -155,13 +198,10 @@ routing needs a full iproute2 `ip` in userspace.
 - UDP floods far above capacity (200 Mbit/s offered) varied too much within
   one kernel to compare, and iperf3's delivered count is not trustworthy at
   80–99% loss.
-- `0008` passes the kernel's WireGuard selftests on 6.18.54 (qemu arm64,
-  emulated) and on `net-next` (x86 KVM), each with 4 CPUs and with 1.
-- **Known issue:** on a fast single-CPU x86 guest `0008` drops packets on
-  receive (~9000 TCP retransmissions per 10 s; vanilla has none), most
-  likely at its 256-packet receive queue cap. The board never reaches the
-  cap. See [upstream/README.md](upstream/README.md).
-- Traffic routed through the board has not been measured with `0008` yet.
+- A UDP flood between two namespaces of one single-CPU guest loses about
+  half the packets with `0008`, as plain UDP over veth does there; without
+  it the crypt workqueue throttled the sender. Senders on another machine,
+  as on a router, are not affected.
 
 ## License
 

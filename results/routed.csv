@@ -1,0 +1,27 @@
+# One board (RTL8196E, Linux 6.18.54), board_three_goals.py from the lab_liddle stand; wired LAN host.
+# kernel: v4 = 0002 0003 0008; v5 = v4 + CT/NOTRACK in the kernel config. notrack: none, manual (two raw rules by hand), daemon (installed by the gateway daemon).
+kernel,notrack,goal,direction,seconds,mbit_s,board_cpu_percent
+v4,none,1,"TCP forward",5,8.856,83
+v4,none,1,"TCP reverse",5,9.575,95
+v4,none,1,"UDP 5M",5,5.0,79
+v4,none,2,"TCP forward",5,8.371,94
+v4,none,2,"TCP reverse",5,9.156,96
+v4,none,2,"UDP 5M",5,5.0,78
+v4,none,3,"TCP forward",5,9.505,98
+v4,none,3,"TCP reverse",5,8.403,97
+v4,none,3,"UDP 5M",5,5.0,79
+v5,none,1,"TCP forward",120,8.676,100
+v5,none,1,"TCP reverse",120,9.978,100
+v5,none,1,"UDP 5M",120,5.0,73
+v5,none,1,"TCP forward",120,8.628,100
+v5,none,1,"TCP reverse",120,9.927,100
+v5,none,1,"UDP 5M",120,5.0,73
+v5,manual,1,"TCP forward",120,9.232,100
+v5,manual,1,"TCP reverse",120,10.706,100
+v5,manual,1,"UDP 5M",120,5.0,71
+v5,manual,1,"TCP forward",120,9.253,100
+v5,manual,1,"TCP reverse",120,10.658,100
+v5,manual,1,"UDP 5M",120,5.0,29
+v5,daemon,1,"TCP forward",120,9.092,100
+v5,daemon,1,"TCP reverse",120,10.617,100
+v5,daemon,1,"UDP 5M",120,5.0,71
