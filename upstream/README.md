@@ -1,17 +1,16 @@
 # Sending the WireGuard change upstream
 
-> 🔴 **Not ready to send.** On an x86 KVM guest with one vCPU, patch 2
-> causes ~9000 TCP retransmissions per 10 s run where vanilla has none,
-> most likely because the 256-packet receive queue cap drops packets that
-> a fast CPU produces faster than the receive NAPI drains them. The board
-> never reaches that cap. A 2–7% slowdown with 4 vCPUs, where the code path
-> should be unchanged, may be noise from other load on the host and is
-> being rechecked.
->
-> Done: applies to `net-next` (`c29fbea7e`) unchanged and passes the
-> WireGuard selftests there under KVM with 1 and 4 vCPUs.
+> ✅ **Ready for an RFC**, once signed off. Applies to `net-next`
+> (`c29fbea7e`) unchanged and passes the WireGuard selftests there under
+> KVM with 1 and 4 vCPUs. Patch 1/2's leak is reproduced with
+> [`repro-peer-leak.sh`](repro-peer-leak.sh): 5 leaks in 2140 peer
+> removals without it, 0 in 2140 with it. Patch 2/2 on x86 with one vCPU:
+> TCP +7–8%, no retransmissions; four vCPUs unchanged. A same-guest UDP
+> flood on one CPU now loses about half the packets, like plain UDP over
+> veth; the cover letter says so.
 
-A two-patch RFC series against Linux 6.18.54:
+A two-patch RFC series, generated on Linux 6.18.54; it applies to `net-next`
+unchanged:
 
 | Patch | What | Board equivalent |
 |---|---|---|
@@ -43,8 +42,8 @@ flushed more often). A static key selects the mode when
 
 ## Before sending
 
-1. Check that the cover letter's "Tested on" paragraph matches what was run.
-2. Rebase on `net-next`:
+1. Check that the cover letter's "Tested:" paragraph matches what was run.
+2. Apply to a current `net-next`:
    ```sh
    git clone https://git.kernel.org/pub/scm/linux/kernel/git/netdev/net-next.git
    cd net-next && git am -3 ../000[12]-*.patch
@@ -68,8 +67,12 @@ flushed more often). A static key selects the mode when
 ## Sending
 
 `net-next` is closed during the merge window; check
-<https://patchwork.hopto.org/net-next.html> first. Patch 1 is a fix and may be
-asked for separately against `net`.
+<https://patchwork.hopto.org/net-next.html> first.
+
+Patch 1 stands on its own: a reproduced bug in WireGuard as merged, with a
+`Fixes:` tag. It is the least contested part and can go first, alone, as
+`[PATCH net]` with the reproducer described in its commit message; patch 2
+then follows as the RFC.
 
 ```sh
 git format-patch -2 --subject-prefix="RFC PATCH net-next" --cover-letter -o out/
