@@ -97,21 +97,24 @@ not ×2.
 
 ## Upstream
 
-[upstream/](upstream/) holds a two-patch RFC series for the WireGuard and
-netdev lists, against `net-next`:
+[upstream/](upstream/) holds two patches for the WireGuard and netdev lists:
 
-1. **A bug fix for WireGuard as it is:** a peer removed while its receive
-   queue holds more than one NAPI budget of packets is never freed, with
-   its keypair. Present since WireGuard was merged in 2019. Reproduced with
+1. **A bug fix for WireGuard as it is, sent on 2026-10-03** as
+   [`[PATCH net] wireguard: peer: free packets left on the per-peer queues on removal`](https://lore.kernel.org/netdev/20261003201625.4572-1-apasichnik9@gmail.com/)
+   ([patchwork](https://patchwork.kernel.org/project/netdevbpf/patch/20261003201625.4572-1-apasichnik9@gmail.com/)). A peer removed while its receive queue holds more
+   than one NAPI budget of packets is never freed, with its keypair.
+   Present since WireGuard was merged in 2019. Reproduced with
    [upstream/repro-peer-leak.sh](upstream/repro-peer-leak.sh): 5 leaks in
    2140 peer removals on `net-next` without the fix, 0 in 2140 with it
    ([results/peer-leak.csv](results/peer-leak.csv)).
-2. **`0008`** in upstream form. On an x86 guest with one vCPU TCP between two
-   namespaces gains 7–8%; with four vCPUs nothing changes
+2. **`0008`** in upstream form, prepared as an RFC for `net-next` and not
+   sent yet. On an x86 guest with one vCPU TCP between two namespaces gains
+   7–8%; with four vCPUs nothing changes
    ([results/x86-vm.csv](results/x86-vm.csv)).
 
-Both pass the kernel's WireGuard selftests on `net-next` (x86 KVM) and on
-6.18.54 (arm64, emulated), with 4 CPUs and with 1.
+Both pass the kernel's WireGuard selftests on `net` and `net-next` (x86
+KVM) and on 6.18.54 (arm64, emulated), with 4 CPUs and with 1; `W=1` and
+sparse report nothing new on x86_64 (SMP and UP) and i386.
 
 ## Patches
 

@@ -1,0 +1,76 @@
+From 7ec8c345209779da80d025838c67c06e7740fc26 Mon Sep 17 00:00:00 2001
+From: Andrii Pasichnyk <apasichnik9@gmail.com>
+Date: Fri, 2 Oct 2026 19:36:27 +0300
+Subject: [PATCH net] wireguard: peer: free packets left on the per-peer queues
+ on removal
+
+peer_remove_after_dead() flushes the crypt workqueue and then disables
+the peer's NAPI. Once a disable is pending, __napi_poll() completes the
+instance after the poll returns even if it used its whole budget, so a
+peer removed while more than one budget of decrypted packets waits on
+rx_queue keeps the rest there. Each entry holds a keypair and a peer
+reference, so the peer is never released; the WARN_ON in rcu_release()
+that checks for leftovers is never reached either.
+
+Free whatever is left on both per-peer queues once nothing can feed them
+any more: receive entries are single packets, transmit entries lists.
+
+Reproduced with the WireGuard selftest VM (x86 KVM, 1 vCPU, net-next):
+remove a peer while a UDP flood keeps its receive queue busy, re-add it,
+repeat, then run the selftest's created/destroyed object check. Over
+2140 removals the unpatched kernel leaked a peer and its keypair 5
+times ("wg0: Peer 27: merely created"); with this patch, 0 times in
+another 2140.
+
+Fixes: e7096c131e51 ("net: WireGuard secure network tunnel")
+Assisted-by: LLM
+Signed-off-by: Andrii Pasichnyk <apasichnik9@gmail.com>
+---
+ drivers/net/wireguard/peer.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/drivers/net/wireguard/peer.c b/drivers/net/wireguard/peer.c
+index 1cb502a..3e08898 100644
+--- a/drivers/net/wireguard/peer.c
++++ b/drivers/net/wireguard/peer.c
+@@ -91,6 +91,25 @@ static void peer_make_dead(struct wg_peer *peer)
+ 	/* The caller must now synchronize_net() for this to take effect. */
+ }
+ 
++/* Each queue entry holds a keypair and a peer reference. Transmit entries
++ * are lists of packets, receive entries single packets.
++ */
++static void peer_purge_queue(struct wg_peer *peer, struct prev_queue *queue,
++			     bool lists)
++{
++	struct sk_buff *first;
++
++	while ((first = wg_prev_queue_peek(queue)) != NULL) {
++		wg_prev_queue_drop_peeked(queue);
++		wg_noise_keypair_put(PACKET_CB(first)->keypair, false);
++		wg_peer_put(peer);
++		if (lists)
++			kfree_skb_list(first);
++		else
++			dev_kfree_skb(first);
++	}
++}
++
+ static void peer_remove_after_dead(struct wg_peer *peer)
+ {
+ 	WARN_ON(!peer->is_dead);
+@@ -122,6 +141,11 @@ static void peer_remove_after_dead(struct wg_peer *peer)
+ 	 * here from process context.
+ 	 */
+ 	netif_napi_del(&peer->napi);
++	/* A NAPI being disabled completes after at most one more poll, which
++	 * may leave packets on rx_queue that still hold references.
++	 */
++	peer_purge_queue(peer, &peer->rx_queue, false);
++	peer_purge_queue(peer, &peer->tx_queue, true);
+ 
+ 	/* Ensure any workstructs we own (like transmit_handshake_work or
+ 	 * clear_peer_work) no longer are in use.
+-- 
+2.53.0
+

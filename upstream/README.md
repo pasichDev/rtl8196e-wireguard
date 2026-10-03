@@ -1,16 +1,20 @@
 # Sending the WireGuard change upstream
 
-> ✅ **Ready for an RFC**, once signed off. Applies to `net-next`
-> (`c29fbea7e`) unchanged and passes the WireGuard selftests there under
-> KVM with 1 and 4 vCPUs. Patch 1/2's leak is reproduced with
-> [`repro-peer-leak.sh`](repro-peer-leak.sh): 5 leaks in 2140 peer
-> removals without it, 0 in 2140 with it. Patch 2/2 on x86 with one vCPU:
-> TCP +7–8%, no retransmissions; four vCPUs unchanged. A same-guest UDP
-> flood on one CPU now loses about half the packets, like plain UDP over
-> veth; the cover letter says so.
+> **Patch 1/2 sent** on 2026-10-03 on its own, as
+> [`[PATCH net] wireguard: peer: free packets left on the per-peer queues on removal`](https://lore.kernel.org/netdev/20261003201625.4572-1-apasichnik9@gmail.com/)
+> ([patchwork](https://patchwork.kernel.org/project/netdevbpf/patch/20261003201625.4572-1-apasichnik9@gmail.com/)), against `net` (`6dc989ea4`): selftests passed there with
+> 1 and 4 vCPUs, and `W=1` and sparse report nothing new. Wait for review;
+> any v2 goes out no sooner than 24 hours later, as a new thread linking to
+> the first.
+>
+> The exact patch as mailed is in [`sent/`](sent/).
+>
+> **Patch 2/2 not sent yet.** It applies to `net-next` (`c29fbea7e`) and
+> passes the selftests there. Send it as an RFC once patch 1 has been
+> answered, so reviewers are not asked about both at once.
 
-A two-patch RFC series, generated on Linux 6.18.54; it applies to `net-next`
-unchanged:
+Two patches, generated on Linux 6.18.54. Patch 1 is a fix for `net`;
+patch 2 is an RFC for `net-next`; both apply to those trees unchanged:
 
 | Patch | What | Board equivalent |
 |---|---|---|
